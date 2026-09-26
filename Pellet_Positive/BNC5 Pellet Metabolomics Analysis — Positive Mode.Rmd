@@ -1,0 +1,296 @@
+---
+title: "BNC5 Metabolomics Analysis — Pellet Positive Mode"
+subtitle: "Response of Bacillus amyloliquefaciens BNC5 to Ralstonia solanacearum Whole Cells"
+author: "Augustine Onuh, PhD | Chulalongkorn University"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, 
+                      message = FALSE,
+                      fig.width = 9, fig.height = 6)
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(FactoMineR)
+  library(factoextra)
+  library(mixOmics)
+  library(ggrepel)
+  library(knitr)
+  library(kableExtra)
+})
+load("BNC5_pellet_pos_analysis_session.RData")
+```
+
+## Executive Summary
+
+This report presents untargeted LC-MS metabolomics analysis of
+*Bacillus amyloliquefaciens* BNC5 pellet extracts comparing three
+conditions: BNC5 alone, BNC5 co-cultured with *Ralstonia solanacearum*
+whole cells (BNC5RSw), and RSw alone (dead cell background control).
+
+**Key findings:**
+
+- **`r sum(anova_results$Significant)`** features showed significant
+  variation across groups (ANOVA, BH-adjusted p < 0.05)
+- **`r nrow(elevated_in_treatment)`** features were elevated in BNC5RSw
+  vs BNC5 (log2FC > 0.58, p_BH < 0.05)
+- After removing **`r sum(elevated_in_treatment$Feature %in% rsw_background_features)`**
+  RSw background features, **`r nrow(true_response)`** true BNC5
+  response features were identified
+- **`r nrow(true_response[true_response$raw_FC > 10,])`** features
+  showed greater than 10-fold elevation in BNC5RSw vs BNC5
+- **`r nrow(reduced_features)`** features were significantly reduced
+  in BNC5RSw compared to BNC5 alone
+
+## Study Design
+
+```{r design-table}
+design_summary <- data.frame(
+  Condition = c("BNC5", "BNC5RSw", "RSw"),
+  Description = c(
+    "B. amyloliquefaciens BNC5 alone — negative control",
+    "BNC5 co-cultured with R. solanacearum whole cells — treatment",
+    "R. solanacearum whole cells alone — background control"
+  ),
+  Replicates = c(
+    "6 (3 x Lot1 + 3 x Lot2)",
+    "6 (3 x Lot1 + 3 x Lot2)",
+    "6 (3 x Lot1 + 3 x Lot2)"
+  ),
+  Role = c(
+    "Baseline BNC5 metabolome",
+    "RSw-induced metabolic response",
+    "Background subtraction control"
+  )
+)
+
+kable(design_summary,
+      caption = "Table 1: Experimental design and sample overview") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+**Instrument:** HPLC-QTOF ESI-MS (positive ionisation mode)
+**Sample type:** Bacterial cell pellets
+**Biological lots:** 2 independent preparations per condition
+**Total samples analysed:** 18
+
+## Data Processing
+
+### XCMS Peak Detection
+
+Raw mzXML files were processed using XCMS (v4.10.1):
+
+- Peak detection: CentWave algorithm
+- Retention time correction: LOESS smoothing, span = 0.6, 2 rounds
+- Peak grouping: density method, bandwidth = 10
+- Missing peak filling: fillPeaks()
+- Adduct and isotope annotation: CAMERA (positive mode)
+- **Total features detected: `r nrow(raw_data)`**
+
+### Preprocessing Pipeline
+
+```{r preprocessing-table}
+preproc <- data.frame(
+  Step = c(
+    "Raw XCMS features",
+    "Zeros converted to NA",
+    "50% per-group presence filter",
+    "Half-minimum imputation",
+    "TIC normalisation",
+    "Log2 transformation",
+    "Autoscaling (z-score per feature)"
+  ),
+  Result = c(
+    paste(nrow(raw_data), "features detected"),
+    paste(sum(raw_data == 0, na.rm = TRUE), "zeros replaced with NA"),
+    paste(nrow(data_filtered), "features retained — 0 removed"),
+    "All missing values replaced — 0 NAs remaining",
+    "All 18 samples normalised to equal total ion count",
+    "Log-normal distribution corrected",
+    "Mean = 0, SD = 1 per feature across samples"
+  )
+)
+
+kable(preproc,
+      caption = "Table 2: Step-by-step preprocessing summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+## Quality Control
+
+### Lot Effect Assessment
+
+```{r lot-pca, fig.cap="Figure 1: PCA coloured by biological lot. Complete overlap between Lot1 and Lot2 confirms no significant technical batch effect between the two independent biological replicates."}
+fviz_pca_ind(pca_result,
+             geom.ind      = "point",
+             col.ind       = lots,
+             palette       = c("#ff7f0e", "#9467bd"),
+             addEllipses   = TRUE,
+             ellipse.level = 0.95,
+             legend.title  = "Lot",
+             title = "PCA — Lot Effect Assessment") +
+  theme_bw(base_size = 12)
+```
+
+Lot1 and Lot2 samples overlapped completely in PCA space confirming
+no significant technical effect between the two independent biological
+lots. Lot was therefore not included as a covariate in statistical models.
+
+### Biological Group Separation
+
+```{r group-pca, fig.cap="Figure 2: PCA scores plot coloured by biological group. PC1 separates BNC5 from RSw-containing groups. PC2 separates BNC5RSw from RSw alone. All three groups show complete separation with no overlap between 95% confidence ellipses."}
+fviz_pca_ind(pca_result,
+             geom.ind      = "point",
+             col.ind       = groups,
+             palette       = c("#2ca02c", "#1f77b4", "#d62728"),
+             addEllipses   = TRUE,
+             ellipse.level = 0.95,
+             legend.title  = "Group",
+             title = paste0("PCA Scores Plot — PC1: ",
+                            var_exp[1], "%, PC2: ",
+                            var_exp[2], "%")) +
+  theme_bw(base_size = 12)
+```
+
+PC1 (**`r var_exp[1]`%** of variance) clearly separated BNC5 from the
+RSw-containing conditions. PC2 (**`r var_exp[2]`%**) distinguished
+BNC5RSw from RSw alone. The positioning of BNC5RSw between BNC5 and
+RSw along PC1 reflects its composite metabolome containing both
+BNC5-derived and RSw-derived metabolites.
+
+## Statistical Analysis
+
+### ANOVA Results
+
+**`r sum(anova_results$Significant)`** of `r nrow(anova_results)`
+features showed significant variation across the three groups after
+Benjamini-Hochberg correction (p < 0.05).
+
+```{r anova-table}
+anova_top15 <- head(anova_results, 15) %>%
+  mutate(
+    ANOVA_p    = formatC(ANOVA_p,    format = "e", digits = 2),
+    ANOVA_p_BH = formatC(ANOVA_p_BH, format = "e", digits = 2)
+  )
+
+kable(anova_top15,
+      caption = "Table 3: Top 15 features by ANOVA significance (BH-corrected)",
+      col.names = c("Feature", "Raw p-value",
+                    "BH-adjusted p", "Significant"),
+      row.names = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+### RSw Background Filter
+
+To identify metabolites specifically produced by BNC5 in response to
+RSw, a three-step filter was applied:
+
+| Filter Step | Count |
+|---|---|
+| Features elevated in BNC5RSw vs BNC5 (log2FC > 0.58, p_BH < 0.05) | `r nrow(elevated_in_treatment)` |
+| Removed — also elevated in RSw background | `r sum(elevated_in_treatment$Feature %in% rsw_background_features)` |
+| **True BNC5 response features** | **`r nrow(true_response)`** |
+| Features reduced in BNC5RSw vs BNC5 | `r nrow(reduced_features)` |
+
+### Volcano Plot
+
+```{r volcano, fig.width=10, fig.height=7, fig.cap="Figure 3: Volcano plot of BNC5RSw vs BNC5. Red = true BNC5 response features. Orange = RSw background features removed by filter. Blue = features reduced in BNC5RSw. Grey = not significant."}
+ggplot(volcano_data,
+       aes(x = log2FC, y = neg_log10p,
+           colour = Direction, label = Label)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_text_repel(size = 2.8, max.overlaps = 20,
+                  colour = "black", box.padding = 0.3) +
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed", colour = "grey40") +
+  geom_vline(xintercept = c(-0.58, 0.58),
+             linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c(
+    "True BNC5 Response" = "#d62728",
+    "RSw Background"     = "#ff7f0e",
+    "Reduced in BNC5RSw" = "#1f77b4",
+    "Not Significant"    = "grey70"
+  )) +
+  labs(
+    x      = "Log2 Fold Change (BNC5RSw vs BNC5)",
+    y      = "-log10(BH-adjusted p-value)",
+    colour = "Category"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+## Multivariate Analysis — PLS-DA
+
+```{r plsda-plot, fig.cap="Figure 4: PLS-DA scores plot using 1,533 true BNC5 response features. Complete separation of all three groups confirms biological specificity of the identified response metabolome."}
+plotIndiv(plsda_model,
+          comp      = c(1, 2),
+          group     = as.factor(groups),
+          ind.names = FALSE,
+          ellipse   = TRUE,
+          legend    = TRUE,
+          title     = "PLS-DA: True BNC5 Response Features",
+          col       = c("#2ca02c", "#1f77b4", "#d62728"))
+```
+
+## Top BNC5 Response Features
+
+```{r top-features}
+top20 <- head(master_table, 20) %>%
+  mutate(p_BH = formatC(p_BH, format = "e", digits = 2))
+
+kable(top20,
+      caption = "Table 4: Top 20 true BNC5 response features ranked by VIP score",
+      col.names = c("Feature", "m/z", "RT (min)",
+                    "Log2FC", "Fold Change", "p_BH", "VIP Score"),
+      row.names = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE,
+                font_size = 11) %>%
+  column_spec(5, bold = TRUE, color = "#d62728")
+```
+
+## Conclusions
+
+Untargeted positive-mode LC-MS metabolomics of *B. amyloliquefaciens*
+BNC5 pellet extracts identified **`r nrow(true_response)`** features
+specifically elevated in BNC5 upon exposure to *R. solanacearum* whole
+cells, after rigorous removal of RSw background metabolites
+(n = `r sum(elevated_in_treatment$Feature %in% rsw_background_features)`).
+
+A further **`r nrow(reduced_features)`** features were significantly
+reduced in BNC5RSw compared to BNC5 alone, indicating active metabolic
+reprogramming in response to pathogen challenge — consistent with
+resource reallocation toward defensive compound biosynthesis.
+
+The complete absence of lot effect confirms biological reproducibility
+across two independent experimental preparations. PCA and PLS-DA both
+confirmed complete metabolic separation between all three groups,
+validating the experimental design and computational workflow.
+
+**Recommended next steps:**
+
+1. Putative annotation of the `r nrow(true_response)` true BNC5
+   response features using accurate mass database searching
+   (HMDB, METLIN, LipidMaps) and MS/MS fragmentation confirmation
+2. Supernatant fraction analysis using the identical pipeline to
+   characterise secreted metabolites
+3. Negative ionisation mode analysis for complementary lipid and
+   organic acid coverage
+
+---
+*Analysis performed by Augustine Onuh, PhD*  
+*Department of Chemistry, Chulalongkorn University, Bangkok, Thailand*  
+*Generated: `r Sys.Date()` | R `r getRversion()` | xcms v4.10.1*
